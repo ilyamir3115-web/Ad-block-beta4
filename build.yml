@@ -1,0 +1,900 @@
+# Сборка APK на серверах GitHub. Весь проект внутри этого файла.
+name: Build APK
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK parts
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" || true
+
+      - name: Write Gradle files
+        run: |
+          mkdir -p app/src/main/java/com/example/adblock app/src/main/assets
+          cat > settings.gradle.kts <<'GRADLE_EOF_1'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AdBlock"
+          include(":app")
+          GRADLE_EOF_1
+          cat > build.gradle.kts <<'GRADLE_EOF_2'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          GRADLE_EOF_2
+          cat > app/build.gradle.kts <<'GRADLE_EOF_3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.adblock"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.adblock"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          GRADLE_EOF_3
+          cat > gradle.properties <<'GRADLE_EOF_4'
+          org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
+          kotlin.code.style=official
+          GRADLE_EOF_4
+
+      - name: Write AndroidManifest.xml
+        run: |
+          cat > app/src/main/AndroidManifest.xml <<'MANIFEST_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".AdVpnService"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_VPN_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+
+              </application>
+          </manifest>
+          MANIFEST_EOF
+
+      - name: Write hosts_builtin.txt
+        run: |
+          cat > app/src/main/assets/hosts_builtin.txt <<'HOSTS_EOF'
+          # Небольшой встроенный список рекламных доменов — работает сразу и без интернета.
+          # Большой список приложение скачивает само при первом запуске.
+          # Блокируется и сам домен, и все его поддомены.
+
+          # Google
+          doubleclick.net
+          googlesyndication.com
+          googleadservices.com
+          googletagservices.com
+          adservice.google.com
+          2mdn.net
+
+          # Рекламные сети для приложений и игр
+          applovin.com
+          applvn.com
+          unityads.unity3d.com
+          supersonicads.com
+          vungle.com
+          chartboost.com
+          mopub.com
+          inmobi.com
+          inmobicdn.net
+          adcolony.com
+          startappservice.com
+          tapjoy.com
+          tapjoyads.com
+          smaato.net
+          smaato.com
+          mintegral.com
+          mintegral.net
+          pangleglobal.com
+          pangle.io
+          an.facebook.com
+
+          # Биржи и сети баннерной рекламы
+          adnxs.com
+          pubmatic.com
+          rubiconproject.com
+          openx.net
+          casalemedia.com
+          criteo.com
+          criteo.net
+          adsrvr.org
+          taboola.com
+          outbrain.com
+          amazon-adsystem.com
+          moatads.com
+          adform.net
+          mgid.com
+          marketgid.com
+          popads.net
+          yieldmo.com
+          bidswitch.net
+          admixer.net
+          advertising.com
+
+          # Яндекс, Mail.ru и другие российские рекламные сети
+          an.yandex.ru
+          yabs.yandex.ru
+          yandexadexchange.net
+          adfox.ru
+          adfox.yandex.ru
+          ad.mail.ru
+          mradx.net
+          adriver.ru
+          directadvert.ru
+          HOSTS_EOF
+
+      - name: Write MainActivity.kt
+        run: |
+          cat > app/src/main/java/com/example/adblock/MainActivity.kt <<'KOTLIN_EOF_1'
+          package com.example.adblock
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.VpnService
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.WindowInsetsController
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          /**
+           * Один экран: большая кнопка «Начать» / «Остановить» и короткий статус.
+           * Вся работа происходит в AdVpnService.
+           */
+          class MainActivity : Activity() {
+
+              private val requestVpn = 1
+              private val handler = Handler(Looper.getMainLooper())
+              private var denied = false
+
+              private lateinit var status: TextView
+              private lateinit var button: Button
+              private lateinit var stats: TextView
+
+              // Палитра: холодная бумага, тёмные чернила, глубокий бирюзовый для «включено».
+              private val paper = Color.parseColor("#EEF2F0")
+              private val ink = Color.parseColor("#14262B")
+              private val teal = Color.parseColor("#0E5C63")
+              private val muted = Color.parseColor("#5B6B70")
+
+              private val offBackground by lazy {
+                  GradientDrawable().apply {
+                      shape = GradientDrawable.OVAL
+                      setColor(Color.WHITE)
+                      setStroke(dp(3), ink)
+                  }
+              }
+              private val onBackground by lazy {
+                  GradientDrawable().apply {
+                      shape = GradientDrawable.OVAL
+                      setColor(teal)
+                  }
+              }
+
+              // Раз в ~0,7 с обновляем экран, пока он открыт.
+              private val ticker = object : Runnable {
+                  override fun run() {
+                      refresh()
+                      handler.postDelayed(this, 700)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setBackgroundColor(paper)
+                      fitsSystemWindows = true
+                  }
+
+                  status = TextView(this).apply {
+                      textSize = 22f
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      setTextColor(ink)
+                      gravity = Gravity.CENTER
+                      setPadding(dp(32), 0, dp(32), 0)
+                  }
+
+                  button = Button(this).apply {
+                      textSize = 22f
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      stateListAnimator = null
+                      setOnClickListener { onButtonClick() }
+                  }
+
+                  stats = TextView(this).apply {
+                      textSize = 14f
+                      setTextColor(muted)
+                      gravity = Gravity.CENTER
+                      setLineSpacing(0f, 1.25f)
+                      setPadding(dp(32), 0, dp(32), 0)
+                  }
+
+                  val match = ViewGroup.LayoutParams.MATCH_PARENT
+                  val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+                  root.addView(status, LinearLayout.LayoutParams(match, wrap).apply { bottomMargin = dp(40) })
+                  root.addView(button, LinearLayout.LayoutParams(dp(200), dp(200)))
+                  root.addView(stats, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(40) })
+
+                  setContentView(root)
+                  useDarkStatusIcons()
+                  refresh()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  handler.post(ticker)
+              }
+
+              override fun onPause() {
+                  handler.removeCallbacks(ticker)
+                  super.onPause()
+              }
+
+              private fun onButtonClick() {
+                  denied = false
+                  if (AdVpnService.isRunning) {
+                      stopService(Intent(this, AdVpnService::class.java))
+                  } else {
+                      // Системное окно «Разрешить VPN?» появляется только в первый раз.
+                      val consent = VpnService.prepare(this)
+                      if (consent != null) {
+                          startActivityForResult(consent, requestVpn)
+                      } else {
+                          startVpn()
+                      }
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == requestVpn) {
+                      if (resultCode == RESULT_OK) startVpn() else denied = true
+                  }
+              }
+
+              private fun startVpn() {
+                  startService(Intent(this, AdVpnService::class.java))
+              }
+
+              private fun refresh() {
+                  val on = AdVpnService.isRunning
+
+                  button.text = if (on) "Остановить" else "Начать"
+                  button.setTextColor(if (on) Color.WHITE else ink)
+                  button.background = if (on) onBackground else offBackground
+
+                  when {
+                      on -> {
+                          status.text = "Реклама блокируется"
+                          stats.text = "Заблокировано ${Blocklist.blockedCount.get()} из ${Blocklist.totalCount.get()} запросов\n" +
+                                  "Доменов в списке: ${Blocklist.size()}"
+                      }
+                      denied -> {
+                          status.text = "Нужно разрешение на VPN"
+                          stats.text = "Нажми «Начать» и подтверди запрос системы.\nЭто локальный VPN на самом телефоне."
+                      }
+                      else -> {
+                          status.text = "Защита выключена"
+                          stats.text = "Нажми «Начать» — реклама отключится во всех приложениях."
+                      }
+                  }
+              }
+
+              /** Светлый фон -> тёмные значки в строке состояния. */
+              @Suppress("DEPRECATION")
+              private fun useDarkStatusIcons() {
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                              WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+                      window.insetsController?.setSystemBarsAppearance(mask, mask)
+                  } else if (Build.VERSION.SDK_INT >= 23) {
+                      var flags = window.decorView.systemUiVisibility
+                      flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                      if (Build.VERSION.SDK_INT >= 26) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                      window.decorView.systemUiVisibility = flags
+                  }
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+          }
+          KOTLIN_EOF_1
+
+      - name: Write AdVpnService.kt
+        run: |
+          cat > app/src/main/java/com/example/adblock/AdVpnService.kt <<'KOTLIN_EOF_2'
+          package com.example.adblock
+
+          import android.content.Intent
+          import android.net.ConnectivityManager
+          import android.net.Network
+          import android.net.NetworkCapabilities
+          import android.net.VpnService
+          import android.os.ParcelFileDescriptor
+          import java.io.FileInputStream
+          import java.io.FileOutputStream
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.Inet4Address
+          import java.net.InetAddress
+          import java.util.concurrent.ExecutorService
+          import java.util.concurrent.Executors
+
+          /**
+           * Локальный VPN, который пропускает через себя ТОЛЬКО DNS-запросы
+           * (маршрут ведёт на один виртуальный адрес). Весь остальной трафик идёт
+           * напрямую, поэтому скорость интернета не страдает.
+           *
+           * Для каждого DNS-запроса:
+           *  - домен есть в списке рекламных -> отвечаем «такого домена нет» (NXDOMAIN),
+           *    рекламный сервер не находится и реклама не загружается;
+           *  - иначе -> пересылаем запрос обычному DNS (тому, что выдал Wi-Fi или оператор)
+           *    и возвращаем ответ как есть.
+           */
+          class AdVpnService : VpnService() {
+
+              companion object {
+                  @Volatile
+                  var isRunning = false
+
+                  // Виртуальные адреса внутри туннеля. Диапазон 198.18.0.0/15 зарезервирован
+                  // для тестов и почти не встречается в домашних сетях.
+                  private const val VPN_ADDRESS = "198.18.0.2"
+                  private const val VPN_DNS = "198.18.0.1"
+
+                  private val FALLBACK_DNS: InetAddress = InetAddress.getByAddress(byteArrayOf(1, 1, 1, 1))
+              }
+
+              /** Куда пересылать обычные запросы: сеть и адрес её DNS-сервера. */
+              private class Upstream(val network: Network?, val dns: InetAddress)
+
+              private var tun: ParcelFileDescriptor? = null
+              private var worker: Thread? = null
+              private var pool: ExecutorService? = null
+
+              @Volatile
+              private var upstream = Upstream(null, FALLBACK_DNS)
+
+              @Volatile
+              private var upstreamCheckedAt = 0L
+
+              // ---------------------------------------------------------------- жизненный цикл
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startVpn()
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  stopVpn()
+                  super.onDestroy()
+              }
+
+              /** Пользователь отключил VPN в системе или включил другой VPN. */
+              override fun onRevoke() {
+                  stopVpn()
+                  super.onRevoke()
+              }
+
+              private fun startVpn() {
+                  if (isRunning) return
+
+                  Blocklist.start(applicationContext)
+                  Blocklist.blockedCount.set(0)
+                  Blocklist.totalCount.set(0)
+
+                  val builder = Builder()
+                      .setSession("AdBlock")
+                      .setBlocking(true)
+                      .addAddress(VPN_ADDRESS, 32)
+                      .addDnsServer(VPN_DNS)
+                      .addRoute(VPN_DNS, 32)   // в туннель попадают только запросы к «нашему» DNS
+
+                  try {
+                      // Само приложение ходит в сеть мимо VPN: скачивает списки и пересылает DNS.
+                      builder.addDisallowedApplication(packageName)
+                  } catch (e: Exception) {
+                  }
+
+                  val tunnel = try {
+                      builder.establish()
+                  } catch (e: Exception) {
+                      null
+                  }
+                  if (tunnel == null) {          // нет разрешения на VPN
+                      stopSelf()
+                      return
+                  }
+
+                  tun = tunnel
+                  isRunning = true
+                  pool = Executors.newFixedThreadPool(16)
+                  worker = Thread { loop(tunnel) }.also { it.start() }
+              }
+
+              private fun stopVpn() {
+                  isRunning = false
+                  worker?.interrupt()
+                  worker = null
+                  pool?.shutdownNow()
+                  pool = null
+                  try {
+                      tun?.close()          // это же прерывает блокирующее чтение в потоке loop()
+                  } catch (e: Exception) {
+                  }
+                  tun = null
+              }
+
+              // ---------------------------------------------------------------- чтение пакетов
+
+              private fun loop(fd: ParcelFileDescriptor) {
+                  val input = FileInputStream(fd.fileDescriptor)
+                  val output = FileOutputStream(fd.fileDescriptor)
+                  val packet = ByteArray(32767)
+                  try {
+                      while (isRunning) {
+                          val len = input.read(packet)
+                          if (len < 0) break
+                          if (len == 0) {
+                              Thread.sleep(10)
+                              continue
+                          }
+                          handlePacket(packet, len, output)
+                      }
+                  } catch (e: Exception) {
+                      // туннель закрыт — при остановке это нормально
+                  }
+                  if (isRunning) stopSelf()
+              }
+
+              /** Разбираем IPv4+UDP пакет; нас интересуют только запросы на порт 53. */
+              private fun handlePacket(p: ByteArray, len: Int, out: FileOutputStream) {
+                  if (len < 28) return
+                  if (((p[0].toInt() and 0xF0) shr 4) != 4) return        // только IPv4
+                  val ihl = (p[0].toInt() and 0x0F) * 4
+                  if (ihl < 20 || len < ihl + 8) return
+                  if ((p[9].toInt() and 0xFF) != 17) return               // только UDP
+
+                  val clientPort = u16(p, ihl)
+                  val serverPort = u16(p, ihl + 2)
+                  if (serverPort != 53) return
+
+                  val udpLen = u16(p, ihl + 4)
+                  val payloadLen = minOf(udpLen - 8, len - ihl - 8)
+                  if (payloadLen < 12) return
+
+                  // Копируем всё нужное: буфер p сразу же будет переиспользован.
+                  val query = p.copyOfRange(ihl + 8, ihl + 8 + payloadLen)
+                  val clientIp = p.copyOfRange(12, 16)
+                  val serverIp = p.copyOfRange(16, 20)
+
+                  pool?.execute { answer(query, clientIp, serverIp, clientPort, out) }
+              }
+
+              private fun answer(
+                  query: ByteArray,
+                  clientIp: ByteArray,
+                  serverIp: ByteArray,
+                  clientPort: Int,
+                  out: FileOutputStream
+              ) {
+                  try {
+                      Blocklist.totalCount.incrementAndGet()
+
+                      val name = Dns.questionName(query)
+                      val reply: ByteArray? =
+                          if (name != null && Blocklist.isBlocked(name)) {
+                              Blocklist.blockedCount.incrementAndGet()
+                              Dns.nxdomain(query)
+                          } else {
+                              forward(query)
+                          }
+                      if (reply == null) return
+
+                      // Ответ идёт «от DNS-сервера» (serverIp:53) обратно клиенту.
+                      val packet = buildUdp(serverIp, clientIp, 53, clientPort, reply)
+                      synchronized(out) { out.write(packet) }
+                  } catch (e: Exception) {
+                  }
+              }
+
+              // ---------------------------------------------------------------- пересылка обычных запросов
+
+              private fun forward(query: ByteArray): ByteArray? {
+                  val up = currentUpstream()
+                  return try {
+                      DatagramSocket().use { socket ->
+                          protect(socket)          // трафик сокета не должен снова попасть в наш VPN
+                          try {
+                              up.network?.bindSocket(socket)   // привязка к реальной сети (Wi-Fi / мобильная)
+                          } catch (e: Exception) {
+                              upstreamCheckedAt = 0L           // сеть сменилась — найдём заново
+                          }
+                          socket.soTimeout = 4000
+                          socket.connect(up.dns, 53)
+                          socket.send(DatagramPacket(query, query.size))
+                          val buf = ByteArray(2048)
+                          val reply = DatagramPacket(buf, buf.size)
+                          socket.receive(reply)
+                          reply.data.copyOfRange(0, reply.length)
+                      }
+                  } catch (e: Exception) {
+                      upstreamCheckedAt = 0L
+                      null
+                  }
+              }
+
+              /**
+               * Берём DNS той сети, которой пользуется само приложение
+               * (мы исключили себя из VPN, поэтому это настоящая сеть, а не наш туннель).
+               * Если что-то пошло не так — используем 1.1.1.1.
+               */
+              private fun currentUpstream(): Upstream {
+                  val now = System.currentTimeMillis()
+                  if (now - upstreamCheckedAt > 3_000) {
+                      upstreamCheckedAt = now
+                      try {
+                          val cm = getSystemService(ConnectivityManager::class.java)
+                          val net = cm.activeNetwork
+                          val caps = if (net != null) cm.getNetworkCapabilities(net) else null
+                          if (net != null && caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                              val dns = cm.getLinkProperties(net)?.dnsServers?.firstOrNull { it is Inet4Address }
+                              upstream = Upstream(net, dns ?: FALLBACK_DNS)
+                          }
+                      } catch (e: Exception) {
+                      }
+                  }
+                  return upstream
+              }
+
+              // ---------------------------------------------------------------- сборка IPv4+UDP пакета
+
+              private fun u16(b: ByteArray, i: Int): Int =
+                  ((b[i].toInt() and 0xFF) shl 8) or (b[i + 1].toInt() and 0xFF)
+
+              private fun buildUdp(
+                  src: ByteArray,
+                  dst: ByteArray,
+                  srcPort: Int,
+                  dstPort: Int,
+                  payload: ByteArray
+              ): ByteArray {
+                  val total = 28 + payload.size
+                  val b = ByteArray(total)
+
+                  // IPv4-заголовок (20 байт)
+                  b[0] = 0x45                              // версия 4, длина заголовка 20
+                  b[2] = (total shr 8).toByte()
+                  b[3] = total.toByte()
+                  b[8] = 64                                // TTL
+                  b[9] = 17                                // протокол UDP
+                  System.arraycopy(src, 0, b, 12, 4)
+                  System.arraycopy(dst, 0, b, 16, 4)
+                  val sum = ipChecksum(b, 20)
+                  b[10] = (sum shr 8).toByte()
+                  b[11] = sum.toByte()
+
+                  // UDP-заголовок (8 байт); контрольная сумма 0 для IPv4 допустима
+                  b[20] = (srcPort shr 8).toByte()
+                  b[21] = srcPort.toByte()
+                  b[22] = (dstPort shr 8).toByte()
+                  b[23] = dstPort.toByte()
+                  val udpLen = 8 + payload.size
+                  b[24] = (udpLen shr 8).toByte()
+                  b[25] = udpLen.toByte()
+
+                  System.arraycopy(payload, 0, b, 28, payload.size)
+                  return b
+              }
+
+              private fun ipChecksum(b: ByteArray, len: Int): Int {
+                  var sum = 0
+                  var i = 0
+                  while (i < len) {
+                      sum += ((b[i].toInt() and 0xFF) shl 8) or (b[i + 1].toInt() and 0xFF)
+                      i += 2
+                  }
+                  while ((sum ushr 16) != 0) {
+                      sum = (sum and 0xFFFF) + (sum ushr 16)
+                  }
+                  return sum.inv() and 0xFFFF
+              }
+          }
+          KOTLIN_EOF_2
+
+      - name: Write Blocklist.kt
+        run: |
+          cat > app/src/main/java/com/example/adblock/Blocklist.kt <<'KOTLIN_EOF_3'
+          package com.example.adblock
+
+          import android.content.Context
+          import java.io.BufferedReader
+          import java.io.File
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.concurrent.atomic.AtomicLong
+
+          /**
+           * Список рекламных доменов.
+           *
+           * Сначала берётся маленький встроенный список (assets/hosts_builtin.txt) —
+           * он работает сразу и без интернета. В фоне скачивается большой список
+           * (формат hosts, ~170 тысяч доменов), подменяет встроенный и обновляется раз в 3 дня.
+           */
+          object Blocklist {
+
+              // Откуда качать список. Пробуются по очереди — можно заменить на свои.
+              private val SOURCES = listOf(
+                  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+                  "https://adaway.org/hosts.txt"
+              )
+              private const val MAX_AGE_MS = 3L * 24 * 60 * 60 * 1000
+
+              val blockedCount = AtomicLong(0)
+              val totalCount = AtomicLong(0)
+
+              @Volatile
+              private var domains: Set<String> = emptySet()
+
+              @Volatile
+              private var updating = false
+
+              @Volatile
+              private var loadedStamp = 0L
+
+              fun size(): Int = domains.size
+
+              /** Блокируется и сам домен, и все его поддомены: a.b.ads.com -> b.ads.com -> ads.com. */
+              fun isBlocked(name: String): Boolean {
+                  val set = domains
+                  var d = name
+                  while (true) {
+                      if (set.contains(d)) return true
+                      val dot = d.indexOf('.')
+                      if (dot < 0) return false
+                      d = d.substring(dot + 1)
+                      if (d.indexOf('.') < 0) return false     // голый «com» не проверяем
+                  }
+              }
+
+              @Synchronized
+              fun start(context: Context) {
+                  val app = context.applicationContext
+
+                  if (domains.isEmpty()) {
+                      try {
+                          app.assets.open("hosts_builtin.txt").bufferedReader().use { domains = parse(it) }
+                      } catch (e: Exception) {
+                      }
+                  }
+
+                  if (updating) return
+                  updating = true
+                  Thread {
+                      try {
+                          val file = File(app.filesDir, "hosts.txt")
+                          if (file.exists() && file.lastModified() != loadedStamp) load(file)
+                          val stale = !file.exists() || System.currentTimeMillis() - file.lastModified() > MAX_AGE_MS
+                          if (stale && download(file)) load(file)
+                      } catch (e: Exception) {
+                      } finally {
+                          updating = false
+                      }
+                  }.start()
+              }
+
+              private fun load(file: File) {
+                  val parsed = file.bufferedReader().use { parse(it) }
+                  if (parsed.size > 1000) {          // защита от битого файла
+                      domains = parsed
+                      loadedStamp = file.lastModified()
+                  }
+              }
+
+              private fun download(target: File): Boolean {
+                  for (url in SOURCES) {
+                      try {
+                          val conn = URL(url).openConnection() as HttpURLConnection
+                          conn.connectTimeout = 15_000
+                          conn.readTimeout = 30_000
+                          if (conn.responseCode != 200) {
+                              conn.disconnect()
+                              continue
+                          }
+                          val tmp = File(target.parentFile, target.name + ".tmp")
+                          conn.inputStream.use { input ->
+                              tmp.outputStream().use { output -> input.copyTo(output) }
+                          }
+                          conn.disconnect()
+                          if (tmp.length() > 50_000 && tmp.renameTo(target)) return true
+                          tmp.delete()
+                      } catch (e: Exception) {
+                      }
+                  }
+                  return false
+              }
+
+              // ---------------------------------------------------------------- разбор файла
+
+              private fun parse(reader: BufferedReader): HashSet<String> {
+                  val out = HashSet<String>(262_144)
+                  reader.forEachLine { addLine(it, out) }
+                  return out
+              }
+
+              /** Понимает и формат hosts («0.0.0.0 ads.example.com»), и просто «ads.example.com». */
+              private fun addLine(raw: String, out: MutableSet<String>) {
+                  var line = raw
+                  val hash = line.indexOf('#')
+                  if (hash >= 0) line = line.substring(0, hash)
+                  line = line.trim()
+                  if (line.isEmpty()) return
+
+                  var domain = line
+                  val sp = line.indexOfFirst { it == ' ' || it == '\t' }
+                  if (sp > 0) {
+                      val ip = line.substring(0, sp)
+                      if (ip != "0.0.0.0" && ip != "127.0.0.1") return
+                      domain = line.substring(sp + 1).trim()
+                      val sp2 = domain.indexOfFirst { it == ' ' || it == '\t' }
+                      if (sp2 > 0) domain = domain.substring(0, sp2)
+                  }
+
+                  domain = domain.lowercase()
+                  if (isValidDomain(domain)) out.add(domain)
+              }
+
+              private fun isValidDomain(d: String): Boolean {
+                  if (d.length < 4 || d.indexOf('.') < 0) return false
+                  if (d == "0.0.0.0" || d == "localhost.localdomain") return false
+                  for (ch in d) {
+                      val ok = (ch in 'a'..'z') || (ch in '0'..'9') || ch == '.' || ch == '-' || ch == '_'
+                      if (!ok) return false
+                  }
+                  return true
+              }
+          }
+
+          /** Минимальная работа с DNS-сообщениями. */
+          object Dns {
+
+              /** Имя из вопроса запроса («ads.example.com», в нижнем регистре) или null. */
+              fun questionName(msg: ByteArray): String? {
+                  if (msg.size < 17) return null
+                  val qdCount = ((msg[4].toInt() and 0xFF) shl 8) or (msg[5].toInt() and 0xFF)
+                  if (qdCount < 1) return null
+
+                  var pos = 12
+                  val sb = StringBuilder()
+                  while (true) {
+                      if (pos >= msg.size) return null
+                      val len = msg[pos].toInt() and 0xFF
+                      if (len == 0) break
+                      if ((len and 0xC0) != 0) return null          // сжатых имён в вопросе не бывает
+                      pos++
+                      if (pos + len > msg.size) return null
+                      if (sb.isNotEmpty()) sb.append('.')
+                      for (i in 0 until len) {
+                          sb.append((msg[pos + i].toInt() and 0xFF).toChar().lowercaseChar())
+                      }
+                      pos += len
+                  }
+                  return sb.toString()
+              }
+
+              /** Ответ «такого домена не существует» (NXDOMAIN) на данный запрос. */
+              fun nxdomain(query: ByteArray): ByteArray? {
+                  var pos = 12
+                  while (pos < query.size && query[pos].toInt() != 0) {
+                      pos += (query[pos].toInt() and 0xFF) + 1
+                  }
+                  val end = pos + 1 + 4                 // нулевой байт имени + QTYPE(2) + QCLASS(2)
+                  if (end > query.size) return null
+
+                  val r = query.copyOfRange(0, end)
+                  r[2] = (0x80 or (query[2].toInt() and 0x01)).toByte()   // QR=1 (ответ), RD как в запросе
+                  r[3] = 0x83.toByte()                                    // RA=1, RCODE=3 (NXDOMAIN)
+                  r[4] = 0; r[5] = 1                                      // один вопрос
+                  r[6] = 0; r[7] = 0; r[8] = 0; r[9] = 0; r[10] = 0; r[11] = 0   // записей-ответов нет
+                  return r
+              }
+          }
+          KOTLIN_EOF_3
+
+      - name: Download Gradle 8.9
+        run: |
+          curl -fsSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip
+          unzip -q gradle.zip
+
+      - name: Build APK
+        run: ./gradle-8.9/bin/gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Publish APK to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AdBlock.apk
+          gh release create "build-${{ github.run_number }}" AdBlock.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "AdBlock #${{ github.run_number }}" \
+            --notes "Установи файл AdBlock.apk на телефон."
